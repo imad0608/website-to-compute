@@ -1,0 +1,645 @@
+Creating a **complete e-commerce website for automobile accessories** with all the requested features is a large project. Below, I provide a **full project structure** with key code snippets and explanations for both frontend and backend. This will be a solid foundation you can run, customize, and extend.
+
+---
+
+# 🚗 Full E-Commerce Website for Automobile Accessories
+
+---
+
+## Project Structure
+
+```
+auto-accessories-ecommerce/
+├── backend/
+│   ├── controllers/
+│   ├── middleware/
+│   ├── models/
+│   ├── routes/
+│   ├── utils/
+│   ├── app.js
+│   ├── config.js
+│   ├── server.js
+│   └── package.json
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   │   ├── api/
+│   │   ├── assets/
+│   │   ├── components/
+│   │   ├── context/
+│   │   ├── hooks/
+│   │   ├── pages/
+│   │   ├── styles/
+│   │   ├── App.jsx
+│   │   ├── main.jsx
+│   │   └── tailwind.config.js
+│   ├── index.html
+│   └── package.json
+└── README.md
+```
+
+---
+
+# Backend (Node.js + Express + MongoDB)
+
+---
+
+### 1. Setup & Dependencies
+
+```bash
+cd backend
+npm init -y
+npm install express mongoose bcryptjs jsonwebtoken cors dotenv nodemailer stripe
+npm install --save-dev nodemon
+```
+
+---
+
+### 2. `config.js` - Environment & DB Connection
+
+```js
+// backend/config.js
+const mongoose = require('mongoose');
+const dotenv = require('dotenv');
+dotenv.config();
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log('MongoDB connected');
+  } catch (error) {
+    console.error(error);
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+```
+
+---
+
+### 3. Models (User , Product, Order)
+
+```js
+// backend/models/User.js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const UserSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isAdmin: { type: Boolean, default: false },
+  orders: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }],
+}, { timestamps: true });
+
+// Password hashing middleware
+User Schema.pre('save', async function (next) {
+  if (!this.isModified('password')) return next();
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+  next();
+});
+
+// Password match method
+User Schema.methods.matchPassword = async function (enteredPassword) {
+  return await bcrypt.compare(enteredPassword, this.password);
+};
+
+module.exports = mongoose.model('User ', UserSchema);
+```
+
+```js
+// backend/models/Product.js
+const mongoose = require('mongoose');
+
+const ProductSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  brand: { type: String, required: true },
+  category: { type: String, required: true },
+  price: { type: Number, required: true },
+  images: [String],
+  description: String,
+  specs: { type: Map, of: String }, // key-value specs
+  stock: { type: Number, default: 0 },
+  featured: { type: Boolean, default: false },
+}, { timestamps: true });
+
+module.exports = mongoose.model('Product', ProductSchema);
+```
+
+```js
+// backend/models/Order.js
+const mongoose = require('mongoose');
+
+const OrderSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User ' },
+  orderItems: [{
+    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+    quantity: Number,
+    price: Number,
+  }],
+  shippingInfo: {
+    address: String,
+    city: String,
+    postalCode: String,
+    country: String,
+  },
+  paymentMethod: String,
+  paymentResult: {
+    id: String,
+    status: String,
+    update_time: String,
+    email_address: String,
+  },
+  totalPrice: Number,
+  isPaid: { type: Boolean, default: false },
+  paidAt: Date,
+  isDelivered: { type: Boolean, default: false },
+  deliveredAt: Date,
+}, { timestamps: true });
+
+module.exports = mongoose.model('Order', OrderSchema);
+```
+
+---
+
+### 4. Middleware (Auth & Error Handling)
+
+```js
+// backend/middleware/auth.js
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+const protect = async (req, res, next) => {
+  let token;
+  if (
+    req.headers.authorization &&
+    req.headers.authorization.startsWith('Bearer')
+  ) {
+    try {
+      token = req.headers.authorization.split(' ')[1];
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = await User.findById(decoded.id).select('-password');
+      next();
+    } catch (error) {
+      res.status(401).json({ message: 'Not authorized, token failed' });
+    }
+  }
+  if (!token) {
+    res.status(401).json({ message: 'Not authorized, no token' });
+  }
+};
+
+const admin = (req, res, next) => {
+  if (req.user && req.user.isAdmin) next();
+  else res.status(401).json({ message: 'Not authorized as admin' });
+};
+
+module.exports = { protect, admin };
+```
+
+---
+
+### 5. Routes (Users, Products, Orders)
+
+```js
+// backend/routes/userRoutes.js
+const express = require('express');
+const router = express.Router();
+const User = require('../models/User');
+const jwt = require('jsonwebtoken');
+const { protect } = require('../middleware/auth');
+
+// Generate JWT
+const generateToken = (id) => {
+  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+};
+
+// Register
+router.post('/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  const userExists = await User.findOne({ email });
+  if (userExists) return res.status(400).json({ message: 'User  already exists' });
+
+  const user = await User.create({ name, email, password });
+  if (user) {
+    res.status(201).json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      token: generateToken(user._id),
+    });
+  } else {
+    res.status(400).json({ message: 'Invalid user data' });
+  }
+});
+
+// Login
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (user && (await user.matchPassword(password))) {
+    res.json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      token: generateToken(user._id),
+    });
+  } else {
+    res.status(401).json({ message: 'Invalid email or password' });
+  }
+});
+
+// Get user profile
+router.get('/profile', protect, async (req, res) => {
+  const user = await User.findById(req.user._id).populate('orders');
+  if (user) {
+    res.json(user);
+  } else {
+    res.status(404).json({ message: 'User  not found' });
+  }
+});
+
+module.exports = router;
+```
+
+```js
+// backend/routes/productRoutes.js
+const express = require('express');
+const router = express.Router();
+const Product = require('../models/Product');
+const { protect, admin } = require('../middleware/auth');
+
+// Get all products with filters and sorting
+router.get('/', async (req, res) => {
+  const { category, brand, minPrice, maxPrice, sort } = req.query;
+  let filter = {};
+  if (category) filter.category = category;
+  if (brand) filter.brand = brand;
+  if (minPrice || maxPrice) {
+    filter.price = {};
+    if (minPrice) filter.price.$gte = Number(minPrice);
+    if (maxPrice) filter.price.$lte = Number(maxPrice);
+  }
+
+  let sortOption = {};
+  if (sort === 'price_asc') sortOption.price = 1;
+  else if (sort === 'price_desc') sortOption.price = -1;
+  else if (sort === 'newest') sortOption.createdAt = -1;
+
+  const products = await Product.find(filter).sort(sortOption);
+  res.json(products);
+});
+
+// Get product by ID
+router.get('/:id', async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (product) res.json(product);
+  else res.status(404).json({ message: 'Product not found' });
+});
+
+// Admin routes to add/edit/delete products
+router.post('/', protect, admin, async (req, res) => {
+  const product = new Product(req.body);
+  const createdProduct = await product.save();
+  res.status(201).json(createdProduct);
+});
+
+router.put('/:id', protect, admin, async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (product) {
+    Object.assign(product, req.body);
+    const updatedProduct = await product.save();
+    res.json(updatedProduct);
+  } else {
+    res.status(404).json({ message: 'Product not found' });
+  }
+});
+
+router.delete('/:id', protect, admin, async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (product) {
+    await product.remove();
+    res.json({ message: 'Product removed' });
+  } else {
+    res.status(404).json({ message: 'Product not found' });
+  }
+});
+
+module.exports = router;
+```
+
+```js
+// backend/routes/orderRoutes.js
+const express = require('express');
+const router = express.Router();
+const Order = require('../models/Order');
+const { protect, admin } = require('../middleware/auth');
+
+// Create new order
+router.post('/', protect, async (req, res) => {
+  const {
+    orderItems,
+    shippingInfo,
+    paymentMethod,
+    totalPrice,
+  } = req.body;
+
+  if (!orderItems || orderItems.length === 0) {
+    return res.status(400).json({ message: 'No order items' });
+  }
+
+  const order = new Order({
+    user: req.user._id,
+    orderItems,
+    shippingInfo,
+    paymentMethod,
+    totalPrice,
+  });
+
+  const createdOrder = await order.save();
+  res.status(201).json(createdOrder);
+});
+
+// Get logged in user's orders
+router.get('/myorders', protect, async (req, res) => {
+  const orders = await Order.find({ user: req.user._id }).populate('orderItems.product');
+  res.json(orders);
+});
+
+// Admin: get all orders
+router.get('/', protect, admin, async (req, res) => {
+  const orders = await Order.find({}).populate('user', 'id name');
+  res.json(orders);
+});
+
+// Update order to paid (simulate payment)
+router.put('/:id/pay', protect, async (req, res) => {
+  const order = await Order.findById(req.params.id);
+  if (order) {
+    order.isPaid = true;
+    order.paidAt = Date.now();
+    order.paymentResult = {
+      id: req.body.id,
+      status: req.body.status,
+      update_time: req.body.update_time,
+      email_address: req.body.email_address,
+    };
+    const updatedOrder = await order.save();
+    res.json(updatedOrder);
+  } else {
+    res.status(404).json({ message: 'Order not found' });
+  }
+});
+
+module.exports = router;
+```
+
+---
+
+### 6. Email Utility (Contact Form)
+
+```js
+// backend/utils/sendEmail.js
+const nodemailer = require('nodemailer');
+
+const sendEmail = async ({ to, subject, text }) => {
+  const transporter = nodemailer.createTransport({
+    service: 'Gmail', // or any SMTP service
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+  });
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_USER,
+    to,
+    subject,
+    text,
+  });
+};
+
+module.exports = sendEmail;
+```
+
+---
+
+### 7. Main App & Server
+
+```js
+// backend/app.js
+const express = require('express');
+const cors = require('cors');
+const connectDB = require('./config');
+const userRoutes = require('./routes/userRoutes');
+const productRoutes = require('./routes/productRoutes');
+const orderRoutes = require('./routes/orderRoutes');
+const sendEmail = require('./utils/sendEmail');
+const dotenv = require('dotenv');
+dotenv.config();
+
+connectDB();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Routes
+app.use('/api/users', userRoutes);
+app.use('/api/products', productRoutes);
+app.use('/api/orders', orderRoutes);
+
+// Contact form route
+app.post('/api/contact', async (req, res) => {
+  const { name, email, message } = req.body;
+  try {
+    await sendEmail({
+      to: process.env.CONTACT_EMAIL,
+      subject: `Contact Form Message from ${name}`,
+      text: `Email: ${email}\n\nMessage:\n${message}`,
+    });
+    res.json({ message: 'Message sent successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Email sending failed' });
+  }
+});
+
+// Health check
+app.get('/', (req, res) => {
+  res.send('API is running...');
+});
+
+module.exports = app;
+```
+
+```js
+// backend/server.js
+const app = require('./app');
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+```
+
+---
+
+### 8. `.env` Example
+
+```
+MONGO_URI=your_mongodb_connection_string
+JWT_SECRET=your_jwt_secret
+EMAIL_USER=your_email@gmail.com
+EMAIL_PASS=your_email_password
+CONTACT_EMAIL=your_contact_email@gmail.com
+```
+
+---
+
+# Frontend (React + TailwindCSS + Vite)
+
+---
+
+### 1. Setup & Dependencies
+
+```bash
+cd ../frontend
+npm create vite@latest auto-accessories-frontend -- --template react
+cd auto-accessories-frontend
+npm install
+npm install react-router-dom axios react-icons @headlessui/react
+npm install -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+```
+
+---
+
+### 2. Tailwind Config (`tailwind.config.js`)
+
+```js
+module.exports = {
+  content: ['./index.html', './src/**/*.{js,jsx}'],
+  darkMode: 'class', // for dark mode toggle
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+```
+
+---
+
+### 3. Tailwind Base Styles (`src/index.css`)
+
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+```
+
+---
+
+### 4. Main Entry (`src/main.jsx`)
+
+```jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+```
+
+---
+
+### 5. App Component with Routing & Dark Mode
+
+```jsx
+// src/App.jsx
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import Navbar from './components/Navbar';
+import Footer from './components/Footer';
+import HomePage from './pages/HomePage';
+import ShopPage from './pages/ShopPage';
+import ProductPage from './pages/ProductPage';
+import CartPage from './pages/CartPage';
+import CheckoutPage from './pages/CheckoutPage';
+import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
+import ProfilePage from './pages/ProfilePage';
+import AboutPage from './pages/AboutPage';
+import ContactPage from './pages/ContactPage';
+import FAQPage from './pages/FAQPage';
+import TermsPage from './pages/TermsPage';
+import AdminDashboard from './pages/AdminDashboard';
+
+function App() {
+  const [darkMode, setDarkMode] = useState(() => {
+    return localStorage.getItem('darkMode') === 'true';
+  });
+
+  useEffect(() => {
+    if (darkMode) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+    localStorage.setItem('darkMode', darkMode);
+  }, [darkMode]);
+
+  return (
+    <Router>
+      <div className="flex flex-col min-h-screen bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-300">
+        <Navbar darkMode={darkMode} setDarkMode={setDarkMode} />
+        <main className="flex-grow container mx-auto px-4 py-6">
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/shop" element={<ShopPage />} />
+            <Route path="/product/:id" element={<ProductPage />} />
+            <Route path="/cart" element={<CartPage />} />
+            <Route path="/checkout/*" element={<CheckoutPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/about" element={<AboutPage />} />
+            <Route path="/contact" element={<ContactPage />} />
+            <Route path="/faq" element={<FAQPage />} />
+            <Route path="/terms" element={<TermsPage />} />
+            <Route path="/admin/*" element={<AdminDashboard />} />
+          </Routes>
+        </main>
+        <Footer />
+      </div>
+    </Router>
+  );
+}
+
+export default App;
+```
+
+---
+
+### 6. Navbar with Dark Mode Toggle & Search Bar
+
+```jsx
+// src/components/Navbar.jsx
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { FaSun, FaMoon, FaShoppingCart } from 'react-icons/fa';
+import axios from 'axios';
+
+function Navbar({ darkMode, setDarkMode }) {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
+  const navigate = useNavigate();
+
+  const handleSearchChange = async (e) => {
+    const value = e.target.value;
+    setSearchTerm(value);
+    if (value.length > 1) {
+      try {
+        const { data } = await axios.get(`/api/products?title_like=${value}&_limit=
